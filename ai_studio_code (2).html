@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>通帳 ➜ 弥生会計 CSV変換</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Shift-JIS変換ライブラリ -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/encoding-japanese/2.0.0/encoding.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 pb-12">
+
+  <!-- ヘッダー -->
+  <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-10">
+    <h1 class="text-lg font-bold text-center">通帳スキャナー (弥生会計対応)</h1>
+  </header>
+
+  <main class="max-w-xl mx-auto p-4 space-y-4">
+
+    <!-- 1. APIキー設定エリア -->
+    <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+      <label class="block text-xs font-semibold text-gray-500 mb-1">OpenAI APIキー</label>
+      <input type="password" id="apiKeyInput" placeholder="sk-..." class="w-full text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <p class="text-[11px] text-gray-400 mt-1">※キーはお使いの端末（ブラウザ）内にのみ保存されます。</p>
+    </div>
+
+    <!-- 2. カメラ撮影・画像選択エリア -->
+    <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-200 text-center space-y-3">
+      <label class="flex flex-col items-center justify-center p-6 border-2 border-dashed border-blue-400 rounded-xl bg-blue-50 cursor-pointer active:bg-blue-100 transition">
+        <svg class="w-10 h-10 text-blue-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path>
+        </svg>
+        <span class="font-bold text-blue-600 text-sm">通帳を撮影 / 画像を選択</span>
+        <!-- capture="environment" によりiPhoneで直接背面カメラが起動 -->
+        <input type="file" id="cameraInput" accept="image/*" capture="environment" class="hidden">
+      </label>
+
+      <!-- プレビュー -->
+      <div id="previewContainer" class="hidden">
+        <img id="imagePreview" class="max-h-48 mx-auto rounded-lg shadow-sm border">
+        <button id="analyzeBtn" class="mt-3 w-full bg-blue-600 active:bg-blue-700 text-white font-bold py-3 rounded-lg shadow">
+          仕訳を自動生成する
+        </button>
+      </div>
+
+      <!-- ローディング -->
+      <div id="loading" class="hidden py-4 text-center">
+        <div class="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-500 border-t-transparent"></div>
+        <p class="text-sm text-gray-500 mt-2 font-medium">通帳を解析＆勘定科目を推測中...</p>
+      </div>
+    </div>
+
+    <!-- 3. 結果確認・編集テーブル -->
+    <div id="resultContainer" class="hidden bg-white p-4 rounded-xl shadow-sm border border-gray-200 space-y-3">
+      <div class="flex justify-between items-center">
+        <h2 class="font-bold text-sm text-gray-700">生成された仕訳一覧</h2>
+        <span id="recordCount" class="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">0件</span>
+      </div>
+
+      <!-- 仕訳リスト（スマホで見やすいカード型編集リスト） -->
+      <div id="entryList" class="space-y-3"></div>
+
+      <!-- CSVエクスポートボタン -->
+      <button id="downloadBtn" class="w-full bg-emerald-600 active:bg-emerald-700 text-white font-bold py-3 rounded-lg shadow flex items-center justify-center space-x-2">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+        <span>弥生会計用CSVをダウンロード</span>
+      </button>
+    </div>
+
+  </main>
+
+  <script>
+    let entries = [];
+    let base64Image = null;
+
+    // APIキーの読み込み・保存
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    apiKeyInput.value = localStorage.getItem('openai_api_key') || '';
+    apiKeyInput.addEventListener('change', () => {
+      localStorage.setItem('openai_api_key', apiKeyInput.value.trim());
+    });
+
+    // 写真選択・撮影イベント
+    const cameraInput = document.getElementById('cameraInput');
+    const previewContainer = document.getElementById('previewContainer');
+    const imagePreview = document.getElementById('imagePreview');
+
+    cameraInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        base64Image = event.target.result;
+        imagePreview.src = base64Image;
+        previewContainer.classList.remove('hidden');
+      };
+      reader.readAsDataURL(file);
+    });
+
+    // 解析リクエスト
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const loading = document.getElementById('loading');
+    const resultContainer = document.getElementById('resultContainer');
+
+    analyzeBtn.addEventListener('click', async () => {
+      const apiKey = apiKeyInput.value.trim();
+      if (!apiKey) {
+        alert('OpenAI APIキーを入力してください。');
+        return;
+      }
+      if (!base64Image) return;
+
+      loading.classList.remove('hidden');
+      analyzeBtn.disabled = true;
+
+      const prompt = `
+      提供された銀行通帳の写真から取引明細を読み取り、仕訳を作成してください。
+      
+      【ルール】
+      - 預入れ（入金）の場合：借方は「普通預金」、貸方は摘要から推測される科目（例: 売掛金、売上、受取利息）
+      - 払出し（出金）の場合：貸方は「普通預金」、借方は摘要から推測される科目（例: 水道光熱費、地代家賃、通信費、買掛金、消耗品費、雑費）
+      - 日付は西暦に変換し、必ず YYYY/MM/DD 形式にしてください。
+      - 金額は半角整数値にしてください。
+      
+      Markdownのコードブロックは使わず、純粋なJSON配列のみを出力してください:
+      [
+        {
+          "date": "2026/04/10",
+          "debitAccount": "消耗品費",
+          "amount": 3500,
+          "creditAccount": "普通預金",
+          "description": "振込 ABC商事"
+        }
+      ]`;
+
+      try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: "gpt-4o",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: prompt },
+                  { type: "image_url", image_url: { url: base64Image } }
+                ]
+              }
+            ],
+            max_tokens: 2500
+          })
+        });
+
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message);
+
+        let content = data.choices[0].message.content.trim();
+        content = content.replace(/```json/g, '').replace(/```/g, '').trim();
+        entries = JSON.parse(content);
+
+        renderEntries();
+        resultContainer.classList.remove('hidden');
+      } catch (err) {
+        alert('解析に失敗しました: ' + err.message);
+      } finally {
+        loading.classList.add('hidden');
+        analyzeBtn.disabled = false;
+      }
+    });
+
+    // エントリーの描画
+    const entryList = document.getElementById('entryList');
+    const recordCount = document.getElementById('recordCount');
+
+    function renderEntries() {
+      entryList.innerHTML = '';
+      recordCount.textContent = `${entries.length}件`;
+
+      entries.forEach((item, index) => {
+        const card = document.createElement('div');
+        card.className = "p-3 border rounded-lg bg-gray-50 text-xs space-y-2";
+        card.innerHTML = `
+          <div class="flex justify-between items-center">
+            <input type="text" value="${item.date}" onchange="entries[${index}].date = this.value" class="font-bold border rounded px-1 py-0.5 w-24">
+            <input type="text" value="${item.description}" onchange="entries[${index}].description = this.value" class="border rounded px-1 py-0.5 flex-1 ml-2" placeholder="摘要">
+            <button onclick="removeEntry(${index})" class="text-red-500 ml-2 font-bold px-1">✕</button>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div class="bg-white p-2 rounded border">
+              <span class="text-[10px] text-gray-400 block">借方科目</span>
+              <input type="text" value="${item.debitAccount}" onchange="entries[${index}].debitAccount = this.value" class="w-full font-medium">
+            </div>
+            <div class="bg-white p-2 rounded border">
+              <span class="text-[10px] text-gray-400 block">貸方科目</span>
+              <input type="text" value="${item.creditAccount}" onchange="entries[${index}].creditAccount = this.value" class="w-full font-medium">
+            </div>
+          </div>
+          <div class="flex justify-between items-center bg-white p-2 rounded border">
+            <span class="text-[10px] text-gray-400">金額</span>
+            <input type="number" value="${item.amount}" onchange="entries[${index}].amount = Number(this.value)" class="text-right font-bold text-sm w-32">
+            <span class="ml-1 text-gray-500">円</span>
+          </div>
+        `;
+        entryList.appendChild(card);
+      });
+    }
+
+    window.removeEntry = function(index) {
+      entries.splice(index, 1);
+      renderEntries();
+    };
+
+    // 弥生会計形式CSVのShift-JIS出力
+    document.getElementById('downloadBtn').addEventListener('click', () => {
+      if (entries.length === 0) return;
+
+      // 弥生会計 05形式 (25項目)
+      // 識別フラグ: 2000固定
+      const lines = entries.map(e => {
+        return [
+          "2000",             // 識別フラグ
+          "",                 // 伝票No
+          "",                 // 決算
+          e.date,             // 取引日付
+          e.debitAccount,     // 借方勘定科目
+          "",                 // 借方補助科目
+          "",                 // 借方部門
+          "対象外",           // 借方税区分
+          e.amount,           // 借方金額
+          0,                  // 借方消費税額
+          e.creditAccount,    // 貸方勘定科目
+          "",                 // 貸方補助科目
+          "",                 // 貸方部門
+          "対象外",           // 貸方税区分
+          e.amount,           // 貸方金額
+          0,                  // 貸方消費税額
+          `"${e.description.replace(/"/g, '""')}"`, // 摘要
+          "", "", "", "", "", // 番号, 期日, タイプ, 生成元, 仕訳メモ
+          0, 0, "no"          // 付箋1, 付箋2, 調整
+        ].join(',');
+      });
+
+      const csvString = lines.join('\r\n');
+
+      // Shift-JIS (Windows-31J) への変換
+      const unicodeArray = Encoding.stringToCode(csvString);
+      const sjisArray = Encoding.convert(unicodeArray, {
+        to: 'SJIS',
+        from: 'UNICODE'
+      });
+      const u8a = new Uint8Array(sjisArray);
+
+      // ダウンロード処理
+      const blob = new Blob([u8a], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `弥生インポート_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  </script>
+</body>
+</html>
